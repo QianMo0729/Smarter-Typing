@@ -1,0 +1,10 @@
+/.build
+/build
+/models
+/third_party
+/data/raw
+/data/build
+/data/eval
+/tools/.venv
+* 2
+.DS_Store
