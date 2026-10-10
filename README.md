@@ -9,6 +9,12 @@
 
 ## 安装 / 更新
 
+需要 Apple Silicon 的 Mac，macOS 14 或更高。
+
+**用安装包**：从 [Releases](https://github.com/QianMo0729/Smarter-Typing/releases) 下载 zip，解压后按里面的“安装说明.txt”操作（把 SmartPinyin.app 放进 `~/Library/Input Methods`，注册，再到系统设置里添加）。
+
+**从源码构建**（先按“开发”一节准备好 llama.cpp、词库和模型）：
+
 ```sh
 ./scripts/build_app.sh   # 生成 build/SmartPinyin.app（含词库、语言模型、小模型）
 ./scripts/install.sh     # 装到 ~/Library/Input Methods 并启用
@@ -60,6 +66,8 @@
 ## 开发
 
 ```sh
+git clone https://github.com/ggml-org/llama.cpp third_party/llama.cpp   # 开发时用的是 9575389
+./scripts/build_llama.sh               # 静态库；不用 -mcpu=native，所有 Apple Silicon 都能跑
 swift build -c release                 # 引擎 + 输入法 + 评测工具
 swift test --scratch-path /tmp/sp-test # 单元测试（Desktop 在 iCloud 里，签名需要换目录）
 
@@ -82,7 +90,16 @@ tools/fit_weights.py feats.jsonl data/build/weights.json
 
 大体积数据（语料、模型、构建产物，约 10 GB）放在 `~/Developer/smarter-typing-data`，项目里只留符号链接。原因是 Desktop 开启了 iCloud 同步。
 
+发布安装包（需要钥匙串里有 Developer ID Application 证书）：
+
+```sh
+xcrun notarytool store-credentials smartpinyin        # 只需一次：保存公证用的 Apple ID 和 App 专用密码
+SMARTPINYIN_NOTARY=smartpinyin ./scripts/release.sh   # 签名 + 公证 → build/dist/SmartPinyin-<版本>.zip
+```
+
 ## 数据来源与许可
+
+本项目源码按 GPL-3.0 发布，见 [LICENSE](LICENSE)；随安装包分发的第三方内容见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 - 词库：[rime-ice（雾凇拼音）](https://github.com/iDvel/rime-ice)，GPL-3.0
 - 语料：中文维基（CC BY-SA）、知乎 KOL、V2EX、Chinese-FineWeb-Edu-v2（Apache-2.0）。仅用于本地统计，不随程序分发
