@@ -42,21 +42,19 @@ final class Settings: ObservableObject {
     @Published var layout: Layout { didSet { d.set(layout.rawValue, forKey: "layout") } }
     @Published var appearance: Appearance { didSet { d.set(appearance.rawValue, forKey: "appearance") } }
     @Published var spacedPinyin: Bool { didSet { d.set(spacedPinyin, forKey: "spacedPinyin") } }
-    @Published var shiftToggles: Bool { didSet { d.set(shiftToggles, forKey: "shiftToggles") } }
     @Published var smartRanking: Bool { didSet { d.set(smartRanking, forKey: "smartRanking") } }
     @Published var learning: Bool { didSet { d.set(learning, forKey: "learning") } }
     @Published var fullWidthPunctuation: Bool { didSet { d.set(fullWidthPunctuation, forKey: "fullWidthPunctuation") } }
 
     private init() {
         d.register(defaults: ["theme": "sustech", "fontSize": 17.0, "pageSize": 9, "layout": "horizontal", "appearance": "system",
-                              "spacedPinyin": true, "shiftToggles": true, "smartRanking": true, "learning": true, "fullWidthPunctuation": true])
+                              "spacedPinyin": true, "smartRanking": true, "learning": true, "fullWidthPunctuation": true])
         theme = ThemeColor(rawValue: d.string(forKey: "theme") ?? "") ?? .sustech
         fontSize = d.double(forKey: "fontSize")
         pageSize = max(3, min(10, d.integer(forKey: "pageSize")))
         layout = Layout(rawValue: d.string(forKey: "layout") ?? "") ?? .horizontal
         appearance = Appearance(rawValue: d.string(forKey: "appearance") ?? "") ?? .system
         spacedPinyin = d.bool(forKey: "spacedPinyin")
-        shiftToggles = d.bool(forKey: "shiftToggles")
         smartRanking = d.bool(forKey: "smartRanking")
         learning = d.bool(forKey: "learning")
         fullWidthPunctuation = d.bool(forKey: "fullWidthPunctuation")
@@ -130,7 +128,6 @@ struct SettingsView: View {
             }
             Section("输入") {
                 Toggle("拼音按音节分隔显示（zhi neng）", isOn: $s.spacedPinyin)
-                Toggle("单按 Shift 切换中 / 英", isOn: $s.shiftToggles)
                 Toggle("中文标点使用全角", isOn: $s.fullWidthPunctuation)
                 Text("中/英键（Caps Lock）切换输入法：在“系统设置 › 键盘 › 输入法”中打开“使用中/英键切换”。")
                     .font(.footnote).foregroundStyle(.secondary)

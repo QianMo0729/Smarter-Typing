@@ -26,6 +26,7 @@ public struct CommitRecord {
 /// Interpretation of what the user did, for logs / evaluation.
 public enum LearningEventKind: String, Codable {
     case explicitChoice      // picked a non-first candidate
+    case newWord             // put together text the engine could not have offered: now a user word
     case reselection         // deleted a commit and re-entered the same pinyin with other text
     case typoCorrection      // deleted a commit and re-typed nearly the same keys
     case wrongCorrection     // an automatic typo correction was undone
@@ -63,6 +64,12 @@ public final class Learner {
     public var learningRate: Float = 0.02
     public var minGuard: Float = 0.3
     public var maxGuard: Float = 2.5
+    /// A string of single characters the user put together becomes a user word when the engine's own first
+    /// reading of the same pinyin beats it by this much (nats). Closer calls are left to the memory.
+    public var teachMargin: Float = 2
+    /// A single-character word rarer than this next to a taught character is taken as part of the same
+    /// name (林 before 霁雯); the common ones (的, 和, 说 …) are just neighbours.
+    public var nameNeighbour: Float = -8.5
     public var onEvent: ((LearningEvent) -> Void)?
     public private(set) var events: [LearningEvent] = []
     public var recordEvents = true
@@ -70,6 +77,7 @@ public final class Learner {
     private var records: [Int: CommitRecord] = [:]
     private var credited = Set<Int>()
     private var deletedRecords = Set<Int>()
+    private var taught: [Int: [(word: WordID, weight: Float, at: Range<Int>)]] = [:]   // user words each commit added to
     private var run: [RunChar] = []
     private var episode: Episode?
     private var nextId = 1
@@ -95,6 +103,7 @@ public final class Learner {
         run.append(contentsOf: newChars)
         if run.count > 400 { run.removeFirst(run.count - 400) }
         if r.chosenRank > 0 { learnExplicitChoice(r) }
+        if r.chosenRank != 0 { teach(r) }
         if var ep = episode {
             ep.replacement.append(contentsOf: newChars)
             ep.lastActivity = r.time
@@ -139,7 +148,7 @@ public final class Learner {
         }
         if records.count > 200 {
             let old = records.keys.sorted().prefix(records.count - 200)
-            for k in old { records[k] = nil; credited.remove(k); deletedRecords.remove(k) }
+            for k in old { records[k] = nil; credited.remove(k); deletedRecords.remove(k); taught[k] = nil }
         }
     }
 
@@ -164,6 +173,7 @@ public final class Learner {
         let w: Float = r.chosenRank != 0 ? 1.0 : 0.3 + 0.5 * (1 - min(1, r.topProb))
         let prev = engine.contextWords.lastWord(r.context)
         engine.userLM.add(words: r.words, prev: prev, weight: w)
+        for (word, _) in userWords(in: r, deleted: false) { engine.userWords.adjust(word, by: w, time: r.time) }
         // remember the decision in context where it was contested by another reading of the same pinyin
         if let a = r.analysis {
             let ctx = ContextVector(text: r.context, app: r.app)
@@ -241,6 +251,112 @@ public final class Learner {
         emit(.explicitChoice, top.text, r.text, 1.0, r.time)
     }
 
+    // MARK: user words
+
+    /// Character range of every word in a reading.
+    private func spans(_ words: [WordID]) -> [Range<Int>] {
+        var off = 0
+        return words.map { w in
+            let n = engine.lexicon.charCount(w)
+            defer { off += n }
+            return off..<(off + n)
+        }
+    }
+
+    /// The user picked or assembled text the engine did not put first. Where its own reading went wrong, the
+    /// parts it could not have come up with — a name built character by character, a word from deep in the
+    /// list — become user words right away, so next time they are simply there.
+    private func teach(_ r: CommitRecord) {
+        let chars = Array(r.text)
+        let top = r.analysis?.full.first
+        let mine = spans(r.words)
+        guard r.charSyls.count == chars.count, mine.last?.upperBound == chars.count, top?.text != r.text else { return }
+        let user = engine.userWords
+        // the engine's first reading used a taught word that is not wanted here
+        for s in top?.segments ?? [] where UserWords.isUser(s.word) && !r.text.contains(engine.lexicon.surface(s.word)) {
+            user.adjust(s.word, by: -0.5)
+        }
+        // characters the first reading got wrong
+        var wrong = [Bool](repeating: true, count: chars.count)
+        if let topChars = top.map({ Array($0.text) }) {
+            if topChars.count == chars.count {
+                for i in chars.indices { wrong[i] = chars[i] != topChars[i] }
+            } else {
+                var lo = 0, hi = chars.count, th = topChars.count
+                while lo < hi && lo < th && chars[lo] == topChars[lo] { wrong[lo] = false; lo += 1 }
+                while hi > lo && th > lo && chars[hi - 1] == topChars[th - 1] { wrong[hi - 1] = false; hi -= 1; th -= 1 }
+            }
+        }
+        /// Words i..<j, if the engine would not get to them by itself from their pinyin.
+        func needsWord(_ i: Int, _ j: Int) -> (at: Range<Int>, syls: [SylID])? {
+            let span = mine[i].lowerBound..<mine[j - 1].upperBound
+            let syls = r.charSyls[span].compactMap { $0 }
+            guard syls.count == span.count, span.count <= user.maxLength else { return nil }
+            let text = String(chars[span])
+            if user.id(text: text, syls: syls) != nil { return (span, syls) }   // taught before, and chosen over the first reading again
+            if let gap = engine.shortfall(of: text, syls: syls, context: r.context + String(chars[..<span.lowerBound]), app: r.app) {
+                // The engine gets there by itself. For a word or a phrase of words it knows, only the rank is in
+                // question, and that depends on context: the memory's business. A string of single characters
+                // is different, that is what a word it does not know looks like (王思雨 read as 王死于).
+                let spelledOut = j - i > 1 && (i..<j).allSatisfy { mine[$0].count == 1 }
+                if !spelledOut || gap < teachMargin { return nil }
+            }
+            return (span, syls)
+        }
+        func rareSingle(_ k: Int) -> Bool {
+            mine[k].count == 1 && !UserWords.isUser(r.words[k]) && engine.lm.unigramLogP(r.words[k]) < nameNeighbour
+        }
+        var notes: [(word: WordID, weight: Float, at: Range<Int>)] = []
+        var i = 0
+        while i < mine.count {
+            guard wrong[mine[i]].contains(true) else { i += 1; continue }
+            var j = i + 1
+            while j < mine.count && wrong[mine[j]].contains(true) { j += 1 }
+            // a name is often only half wrong: also take it with the surname in front, and with the
+            // character after a lone one
+            var a = i, b = j
+            if a > 0 && rareSingle(a - 1) { a -= 1 }
+            if mine[i].lowerBound + 1 == mine[j - 1].upperBound && b < mine.count && rareSingle(b) { b += 1 }
+            let wanted = ((a, b) == (i, j) ? [(i, j)] : [(i, j), (a, b)]).compactMap(needsWord)
+            for w in wanted {
+                guard let id = user.add(text: String(chars[w.at]), syls: w.syls, weight: 1, time: r.time) else { continue }
+                notes.append((id, 1, w.at))
+                emit(.newWord, top?.text ?? "", String(chars[w.at]), 1, r.time)
+            }
+            i = j
+        }
+        if !notes.isEmpty { taught[r.id] = notes }
+    }
+
+    /// How much of a commit is still standing. Deleting takes characters from its end.
+    private func standing(_ r: CommitRecord) -> Int { run.reduce(0) { $0 + ($1.record == r.id ? 1 : 0) } }
+
+    /// The taught words a commit was written with, either those still standing or those reached by deleting.
+    private func userWords(in r: CommitRecord, deleted: Bool) -> [(WordID, Range<Int>)] {
+        guard r.words.contains(where: UserWords.isUser) else { return [] }
+        let left = standing(r)
+        return zip(r.words, spans(r.words)).filter { UserWords.isUser($0.0) && ($0.1.upperBound > left) == deleted }
+    }
+
+    /// Text of these commits was deleted again: what it taught does not count.
+    private func unteach(_ recs: [CommitRecord]) {
+        for r in recs {
+            guard let notes = taught[r.id] else { continue }
+            let left = standing(r)
+            for n in notes where n.at.upperBound > left { engine.userWords.adjust(n.word, by: -n.weight) }
+            taught[r.id] = notes.filter { $0.at.upperBound <= left }
+        }
+    }
+
+    /// A taught word was offered, deleted and replaced by other text for the same keys.
+    private func demoteUserWords(in recs: [CommitRecord], unlessIn newText: String, weight: Float) {
+        for r in recs {
+            for (w, _) in userWords(in: r, deleted: true) where !newText.contains(engine.lexicon.surface(w)) {
+                engine.userWords.adjust(w, by: -weight)
+            }
+        }
+    }
+
     private func resolve(now: Double) {
         guard let ep = episode else { return }
         episode = nil
@@ -250,6 +366,7 @@ public final class Learner {
         let oldRecs = Array(Set(ep.deleted.map { $0.record })).sorted().compactMap { records[$0] }
         let newRecs = Array(Set(ep.replacement.map { $0.record })).sorted().compactMap { records[$0] }
         guard let firstOld = oldRecs.first else { return }
+        unteach(oldRecs)
         let age = ep.start - (oldRecs.last?.time ?? ep.start)
         let timeW: Float = age < 15 ? 1.0 : (age < 60 ? 0.6 : 0.25)
         // context before the deleted text
@@ -284,6 +401,7 @@ public final class Learner {
             if oldSyls.count == oldSyl.count { engine.memory.add(syls: oldSyls, text: oldText, ctx: ctx, weight: -0.8 * w) }
             if let a = oldRecs[0].analysis { sgd(a, correct: newText, weight: w) }
             for r in oldRecs where credited.contains(r.id) { engine.userLM.add(words: r.words, prev: engine.contextWords.lastWord(r.context), weight: -0.3) }
+            demoteUserWords(in: oldRecs, unlessIn: newText, weight: w)
             emit(.reselection, oldText + "(" + oldRaw + ")", newText, w, now)
         } else if sameSyl && oldText != newText {
             // Same pinyin, different characters: the choice was wrong in this context.
@@ -310,6 +428,7 @@ public final class Learner {
                 if credited.contains(r.id) { engine.userLM.add(words: r.words, prev: engine.contextWords.lastWord(r.context), weight: -0.3) }
                 if let a = r.analysis, oldRecs.count == 1 { sgd(a, correct: newText, weight: w) }
             }
+            demoteUserWords(in: oldRecs, unlessIn: newText, weight: w)
             emit(.reselection, oldText, newText, w, now)
         } else if !keyEdits.isEmpty && keyEdits.count <= 2 && oldText != newText {
             // Nearly the same keys: the user mistyped. Learn the slip and the intended reading.

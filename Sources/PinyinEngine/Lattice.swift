@@ -35,7 +35,7 @@ public struct Lattice {
     public var typoEdges: [SylEdge] = []
     public var n: Int { graph.n }
 
-    public init(graph: SyllableGraph, lexicon: Lexicon, lm: NGramModel, options: LatticeOptions = LatticeOptions()) {
+    public init(graph: SyllableGraph, lexicon: Lexicon, lm: NGramModel, options: LatticeOptions = LatticeOptions(), user: UserWords? = nil) {
         self.graph = graph
         edgesFrom = Array(repeating: [], count: graph.n + 1)
         sylPool.reserveCapacity(4096)
@@ -43,6 +43,7 @@ public struct Lattice {
         var scratch = Scratch(n: graph.n)
         for s in 0..<graph.n where reach[s] {
             expand(from: s, lexicon: lexicon, lm: lm, options: options, scratch: &scratch)
+            if let user, !user.isEmpty { expandUser(from: s, user: user, lm: lm, options: options) }
         }
     }
 
@@ -172,6 +173,50 @@ public struct Lattice {
                 edgesFrom[s].append(e)
                 if exact >= options.wordsPerSpan && typo >= options.typoWordsPerSpan { break }
             }
+        }
+    }
+
+    /// Words the user taught, read the same ways as lexicon words (exact, unfinished, abbreviated, one slip).
+    /// There are few of them and the user asked for each one, so they are not subject to the span quotas.
+    private mutating func expandUser(from s: Int, user: UserWords, lm: NGramModel, options: LatticeOptions) {
+        struct Frame { var pos: Int; var node: Int; var syls: [SylID]; var typos: Int16; var abbrevs: Int16; var editRef: Int32; var typo: Float; var shape: Float }
+        let n = graph.n
+        var found: [WordEdge] = []
+        var stack = [Frame(pos: s, node: 0, syls: [], typos: 0, abbrevs: 0, editRef: -1, typo: 0, shape: 0)]
+        while let f = stack.popLast() {
+            if f.syls.count >= options.maxWordSyllables { continue }
+            for e in graph.edgesFrom[f.pos] {
+                let isTypo = e.kind == .typo, isAbbrev = e.kind == .abbrev, isPartial = e.kind == .partial
+                if isTypo && Int(f.typos) >= options.maxTyposPerWord { continue }
+                if isAbbrev && f.abbrevs >= 4 { continue }
+                var editRef = f.editRef
+                user.forEachChild(f.node, in: graph.syls(e)) { syl, child in
+                    if isTypo && editRef == f.editRef {
+                        editRef = Int32(typoEdges.count)
+                        typoEdges.append(e)
+                    }
+                    let nf = Frame(pos: e.end, node: child, syls: f.syls + [syl], typos: f.typos + (isTypo ? 1 : 0), abbrevs: f.abbrevs + (isAbbrev ? 1 : 0),
+                                   editRef: editRef, typo: f.typo + (isTypo ? e.cost : 0), shape: f.shape + (isTypo ? 0 : e.cost))
+                    let words = user.words(at: child)
+                    // an abbreviated single syllable is too ambiguous to stand alone as a word
+                    if !words.isEmpty && !(nf.syls.count == 1 && isAbbrev) {
+                        let sylStart = Int32(sylPool.count)
+                        sylPool.append(contentsOf: nf.syls)
+                        for w in words {
+                            found.append(WordEdge(start: Int32(s), end: Int32(e.end), word: w, sylStart: sylStart, sylCount: Int16(nf.syls.count),
+                                typos: nf.typos, abbrevs: nf.abbrevs, partial: isPartial, editRef: nf.typos > 0 ? nf.editRef : -1,
+                                reading: 0, typoCost: nf.typo, shapeCost: nf.shape, unigram: lm.unigramLogP(w)))
+                        }
+                    }
+                    if e.end < n && !isPartial && user.hasChildren(child) { stack.append(nf) }
+                }
+            }
+        }
+        // cheapest reading per word and span
+        found.sort { $0.typoCost + $0.shapeCost < $1.typoCost + $1.shapeCost }
+        var seen = Set<UInt64>()
+        for e in found where seen.insert(UInt64(UInt32(bitPattern: e.word)) << 32 | UInt64(UInt32(bitPattern: e.end))).inserted {
+            edgesFrom[s].append(e)
         }
     }
 }

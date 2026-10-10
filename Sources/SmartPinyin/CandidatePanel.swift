@@ -90,21 +90,6 @@ final class CandidatePanel {
 
     func hide() { panel.orderOut(nil) }
 
-    /// Brief "中" / "英" indicator next to the cursor when the mode changes.
-    private var hideWork: DispatchWorkItem?
-    func flash(_ text: String, anchor: NSRect) {
-        view.update(rows: [[(-1, text)]], highlighted: -2, expanded: false, canExpand: false, vertical: false, bare: true)
-        let size = view.fittingSize
-        view.frame = NSRect(origin: .zero, size: size)
-        container.frame = NSRect(origin: .zero, size: size)
-        panel.appearance = Settings.shared.nsAppearance
-        panel.setFrame(NSRect(origin: NSPoint(x: anchor.minX, y: anchor.minY - size.height - 6), size: size), display: true)
-        panel.orderFrontRegardless()
-        hideWork?.cancel()
-        let w = DispatchWorkItem { [weak self] in self?.hide() }
-        hideWork = w
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: w)
-    }
 }
 
 final class CandidateView: NSView {
@@ -123,15 +108,14 @@ final class CandidateView: NSView {
     private var expanded = false
     private var canExpand = false
     private var vertical = false
-    private var bare = false
     private var hitRects: [(NSRect, Hit)] = []
     var onClick: ((Hit) -> Void)?
 
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    func update(rows: [[(Int, String)]], highlighted: Int, expanded: Bool, canExpand: Bool, vertical: Bool = false, bare: Bool = false) {
-        self.rows = rows; self.highlighted = highlighted; self.expanded = expanded; self.canExpand = canExpand; self.vertical = vertical; self.bare = bare
+    func update(rows: [[(Int, String)]], highlighted: Int, expanded: Bool, canExpand: Bool, vertical: Bool = false) {
+        self.rows = rows; self.highlighted = highlighted; self.expanded = expanded; self.canExpand = canExpand; self.vertical = vertical
         needsDisplay = true
     }
 
@@ -145,7 +129,7 @@ final class CandidateView: NSView {
     private func itemParts(_ n: Int, _ text: String, selected: Bool, numbered: Bool) -> (NSAttributedString, NSAttributedString) {
         let numColor = selected ? NSColor.white.withAlphaComponent(0.85) : NSColor.secondaryLabelColor
         let textColor = selected ? NSColor.white : NSColor.labelColor
-        let num = NSAttributedString(string: bare ? "" : (numbered ? "\(n)" : " "), attributes: [.font: numberFont, .foregroundColor: numColor])
+        let num = NSAttributedString(string: numbered ? "\(n)" : " ", attributes: [.font: numberFont, .foregroundColor: numColor])
         let txt = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: textColor])
         return (num, txt)
     }
@@ -166,7 +150,6 @@ final class CandidateView: NSView {
             maxW = max(maxW, w - itemGap)
         }
         let width = maxW + (canExpand ? chevronWidth + 4 : 0) + Self.padX
-        if bare { return NSSize(width: max(width, rowHeight + 8), height: rowHeight + 8) }
         return NSSize(width: max(width, vertical ? 90 : 120), height: CGFloat(max(1, rows.count)) * rowHeight + 8)
     }
 

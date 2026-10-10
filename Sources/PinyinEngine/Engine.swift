@@ -84,6 +84,8 @@ public final class Engine: @unchecked Sendable {
     public let contextWords: ContextWords
     public let userLM: UserLM
     public let memory: ContextMemory
+    /// Words the user taught (names and the like), see UserWords.
+    public var userWords: UserWords { lexicon.user }
     public var weightsFast = FusionWeights.fast
     public var weightsFull = FusionWeights.full
     /// A typo-corrected reading must beat the best literal reading by this many nats to become first.
@@ -98,6 +100,7 @@ public final class Engine: @unchecked Sendable {
     public func resetPersonal() {
         userLM.restore(UserLM.State(uni: [:], bi: [:], prevTotal: [:], total: 0))
         memory.table = [:]
+        userWords.removeAll()
         typo.reset()
         weightsFast = .fast; weightsFull = .full; typoGuard = 0.5
         loadWeights(resourceDir.appendingPathComponent("weights.json"))
@@ -113,6 +116,8 @@ public final class Engine: @unchecked Sendable {
         decoder = Decoder(lexicon: lexicon, lm: lm)
         contextWords = ContextWords(lexicon: lexicon)
         userLM = UserLM(base: lm)
+        lm.userWords = lexicon.user
+        userLM.taught = lexicon.user
         memory = ContextMemory()
         let wURL = resources.dir.appendingPathComponent("weights.json")
         if let d = try? Data(contentsOf: wURL), let w = try? JSONDecoder().decode(WeightsFile.self, from: d) {
@@ -139,9 +144,9 @@ public final class Engine: @unchecked Sendable {
     public func analyze(raw: String, context: String, app: String? = nil) -> Analysis {
         let t0 = DispatchTime.now().uptimeNanoseconds
         let graph = SyllableGraph(raw: Array(raw.lowercased().utf8), table: lexicon.syllables, typo: typo, options: graphOptions)
-        let lattice = Lattice(graph: graph, lexicon: lexicon, lm: lm, options: latticeOptions)
+        let lattice = Lattice(graph: graph, lexicon: lexicon, lm: lm, options: latticeOptions, user: usePersonal ? userWords : nil)
         let cword = contextWords.lastWord(context)
-        let bonus: PathBonus? = usePersonal && userLM.total > 0 ? userLM : nil
+        let bonus: PathBonus? = usePersonal && userLM.isActive ? userLM : nil
         let r = decoder.decode(lattice: lattice, context: cword, weights: weightsFast, bonus: bonus, ctxStrength: Engine.contextStrength(context))
         var a = Analysis(raw: raw, context: context, app: app, contextWord: cword, ctxVec: ContextVector(text: context, app: app),
                          graph: graph, full: r.full, prefix: r.prefix, covered: r.covered, n: r.n)
@@ -156,7 +161,7 @@ public final class Engine: @unchecked Sendable {
 
     func addPersonalFeatures(_ a: inout Analysis) {
         guard usePersonal else { return }
-        let hasLM = userLM.total > 0, hasMem = !memory.isEmpty
+        let hasLM = userLM.isActive, hasMem = !memory.isEmpty
         if !hasLM && !hasMem { return }
         func fill(_ c: inout Candidate) {
             var prev = a.contextWord
@@ -171,6 +176,15 @@ public final class Engine: @unchecked Sendable {
         }
         for i in a.full.indices { fill(&a.full[i]) }
         for i in a.prefix.indices { fill(&a.prefix[i]) }
+    }
+
+    /// How far `text` is from being the engine's own first reading of exactly these syllables in this context
+    /// (nats; 0 = it is first). Nil when the engine does not arrive at it at all, however it ranks things.
+    public func shortfall(of text: String, syls: [SylID], context: String, app: String? = nil) -> Float? {
+        let keys = syls.map { lexicon.syllables.spelling($0) }.joined(separator: "'")
+        let a = analyze(raw: keys, context: context, app: app)
+        guard let top = a.full.first, let c = a.full.first(where: { $0.text == text }) else { return nil }
+        return top.score - c.score
     }
 
     /// Fold neural log-probabilities (aligned with `a.full`) into the features and re-rank.

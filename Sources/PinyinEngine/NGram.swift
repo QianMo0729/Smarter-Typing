@@ -15,6 +15,8 @@ public final class NGramModel: @unchecked Sendable {
     public let hasBigrams: Bool
     /// Log prior for words added to the lexicon after the n-gram model was estimated (ids ≥ vocab).
     public var oovPrior: UnsafeBufferPointer<Float>?
+    /// Words taught by the user bring their own estimate (ids far above the lexicon's).
+    public var userWords: UserWords?
 
     public init(url: URL) throws {
         var r = try BinaryReader(url: url, magic: "STLM")
@@ -39,6 +41,7 @@ public final class NGramModel: @unchecked Sendable {
     }
 
     @inline(__always) func oov(_ w: WordID) -> Float {
+        if UserWords.isUser(w) { return userWords?.logP(w) ?? -25 }
         if let p = oovPrior, Int(w) < p.count { return p[Int(w)] - 2 }
         return -25
     }

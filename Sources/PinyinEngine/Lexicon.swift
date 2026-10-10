@@ -51,6 +51,8 @@ public final class Lexicon: @unchecked Sendable {
     let wordReading: UnsafeBufferPointer<Float>
     private var surfaceIndex: [String: WordID]? = nil
     private let indexLock = NSLock()
+    /// Words taught by the user. Their ids continue above the lexicon's and resolve through the same calls.
+    public let user = UserWords()
 
     public init(url: URL) throws {
         var r = try BinaryReader(url: url, magic: "STLX")
@@ -75,11 +77,14 @@ public final class Lexicon: @unchecked Sendable {
     }
 
     @inline(__always) public func surface(_ w: WordID) -> String {
+        if UserWords.isUser(w) { return user.entry(w)?.text ?? "" }
         let a = Int(surfOffsets[Int(w)]), b = Int(surfOffsets[Int(w) + 1])
         return String(decoding: UnsafeBufferPointer(rebasing: surfBlob[a..<b]), as: UTF8.self)
     }
 
-    @inline(__always) public func charCount(_ w: WordID) -> Int { Int(surfChars[Int(w)]) }
+    @inline(__always) public func charCount(_ w: WordID) -> Int {
+        UserWords.isUser(w) ? user.entry(w)?.syls.count ?? 0 : Int(surfChars[Int(w)])
+    }
 
     /// Child of `node` along syllable `s`, or -1.
     @inline(__always) public func child(_ node: Int, _ s: SylID) -> Int {
@@ -134,6 +139,6 @@ public final class Lexicon: @unchecked Sendable {
             for i in 0..<surfaceCount { m[self.surface(WordID(i))] = WordID(i) }
             surfaceIndex = m
         }
-        return surfaceIndex![surface]
+        return surfaceIndex![surface] ?? user.id(ofText: surface)
     }
 }

@@ -14,9 +14,6 @@ final class SmartPinyinInputController: IMKInputController {
     }()
     private var settings: Settings { Settings.shared }
     private var vertical: Bool { settings.layout == .vertical }
-    private var asciiMode = false
-    private var shiftDown = false
-    private var shiftUsedWithKey = false
     private var punct = Punctuation()
     private var localContext = ""            // what we committed recently, for apps without context access
     private var expectedLocation: Int?       // cursor location after our last commit (UTF-16)
@@ -26,7 +23,7 @@ final class SmartPinyinInputController: IMKInputController {
     private var appID: String? { (client() as IMKTextInput?)?.bundleIdentifier() }
 
     override func recognizedEvents(_ sender: Any!) -> Int {
-        Int(NSEvent.EventTypeMask.keyDown.rawValue | NSEvent.EventTypeMask.flagsChanged.rawValue)
+        Int(NSEvent.EventTypeMask.keyDown.rawValue)
     }
 
     override func activateServer(_ sender: Any!) {
@@ -57,9 +54,7 @@ final class SmartPinyinInputController: IMKInputController {
 
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
         guard let event, let client = sender as? IMKTextInput else { return false }
-        if event.type == .flagsChanged { return handleFlags(event, client) }
         guard event.type == .keyDown else { return false }
-        if shiftDown { shiftUsedWithKey = true }
         let mods = event.modifierFlags.intersection([.command, .control, .option])
         let code = event.keyCode
         let chars = event.characters ?? ""
@@ -89,7 +84,6 @@ final class SmartPinyinInputController: IMKInputController {
             return false
         default: break
         }
-        if asciiMode { noteForeignText(chars); return false }
         guard let ch = chars.first, chars.count == 1 else { return false }
         if ch >= "a" && ch <= "z" {
             startComposition(client)
@@ -183,26 +177,6 @@ final class SmartPinyinInputController: IMKInputController {
         let start = (composer.highlighted / ps) * ps
         let target = dir > 0 ? start + rows * ps : max(0, start - rows * ps)
         if target < composer.displayed.count { composer.moveHighlight(target - composer.highlighted) }
-    }
-
-    private func handleFlags(_ event: NSEvent, _ client: IMKTextInput) -> Bool {
-        let shift = event.modifierFlags.contains(.shift)
-        let others = !event.modifierFlags.intersection([.command, .control, .option]).isEmpty
-        if shift && !shiftDown {
-            shiftDown = true
-            shiftUsedWithKey = others
-        } else if !shift && shiftDown {
-            shiftDown = false
-            if !shiftUsedWithKey && !others && settings.shiftToggles {
-                // a lone Shift tap toggles Chinese / English
-                if composer.isComposing { commitRawText(client) }
-                asciiMode.toggle()
-                var rect = NSRect.zero
-                client.attributes(forCharacterIndex: 0, lineHeightRectangle: &rect)
-                CandidatePanel.shared.flash(asciiMode ? "英" : "中", anchor: rect)
-            }
-        }
-        return false
     }
 
     // MARK: composition plumbing

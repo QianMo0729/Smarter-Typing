@@ -12,14 +12,19 @@ public final class UserLM: PathBonus, @unchecked Sendable {
     public var uniWeight: Float = 0.6
     public var maxBonus: Float = 8
     public var minBonus: Float = -2
+    /// Words the user taught explicitly; they carry a bonus of their own, before any statistics exist.
+    public var taught: UserWords?
 
     public init(base: NGramModel) { self.base = base }
+
+    /// Whether there is anything personal to add to the search.
+    public var isActive: Bool { total > 0 || !(taught?.isEmpty ?? true) }
 
     @inline(__always) static func key(_ a: WordID, _ b: WordID) -> UInt64 { UInt64(UInt32(bitPattern: a)) << 32 | UInt64(UInt32(bitPattern: b)) }
 
     public func bonus(prev: WordID, word: WordID) -> Float {
-        if total == 0 { return 0 }
-        var b: Float = 0
+        var b: Float = UserWords.isUser(word) ? taught?.bonus(word) ?? 0 : 0
+        if total == 0 { return b }
         // Observed vs expected counts with a small pseudo-count: words the user uses more than the base model
         // expects get a bonus; frequent words the user conspicuously avoids get a penalty; rare unseen words
         // are left alone (their expected count is tiny).

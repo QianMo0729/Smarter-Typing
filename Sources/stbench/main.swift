@@ -181,6 +181,7 @@ case "personalize":
     let learnEngine = try Engine(resources: EngineResources(dir: resDir))
     if let w = opt("--weights") { learnEngine.loadWeights(URL(fileURLWithPath: w)) }
     let learner = Learner(engine: learnEngine)
+    if let m = opt("--teach-margin") { learner.teachMargin = Float(m)! }
     let sim = UserSimulator(engine: learnEngine, nn: nn, learner: learner)
     if useHabit { sim.habit = habit }
     var block = UserSimulator.Stats()
@@ -224,6 +225,7 @@ case "personalize":
     show("general test", base.evaluate(general))
     print("typo model costs:", EditKind.allCases.map { "\($0.name)=\(String(format: "%.2f", learnEngine.typo.cost($0)))" }.joined(separator: " "), " transpose(u,o)=\(String(format: "%.2f", learnEngine.typo.cost(.transpose, typed: 111, intended: 117)))")
     print("weights full:", learnEngine.weightsFull.w.map { String(format: "%.2f", $0) })
+    print("user words: \(learnEngine.userWords.count)", flag("--diag") ? learnEngine.userWords.all.map { "\($0.text)×\(String(format: "%.1f", $0.count))" }.joined(separator: " ") : "")
     if let dumpPath = opt("--dump") {
         // features of the user's test chunks under the learned personal state (for fitting trust weights)
         FileManager.default.createFile(atPath: dumpPath, contents: nil)
