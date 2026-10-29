@@ -25,23 +25,7 @@ final class CandidatePanel {
         panel.becomesKeyOnlyIfNeeded = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
         view = CandidateView()
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
-            glass.cornerRadius = CandidateView.cornerRadius
-            glass.contentView = view
-            container = glass
-        } else {
-            let effect = NSVisualEffectView()
-            effect.material = .popover
-            effect.state = .active
-            effect.wantsLayer = true
-            effect.layer?.cornerRadius = CandidateView.cornerRadius
-            effect.layer?.masksToBounds = true
-            effect.layer?.borderWidth = 0.5
-            effect.layer?.borderColor = NSColor.separatorColor.cgColor
-            effect.addSubview(view)
-            container = effect
-        }
+        container = makeBackdrop(content: view, cornerRadius: CandidateView.cornerRadius)
         panel.contentView = container
         view.onClick = { [weak self] hit in
             switch hit {
@@ -89,7 +73,87 @@ final class CandidatePanel {
     }
 
     func hide() { panel.orderOut(nil) }
+    var isVisible: Bool { panel.isVisible }
+}
 
+/// Translucent backdrop shared by the candidate window and the status bubble: Liquid Glass on macOS 26,
+/// a popover-material effect view before that.
+func makeBackdrop(content: NSView, cornerRadius: CGFloat) -> NSView {
+    if #available(macOS 26.0, *) {
+        let glass = NSGlassEffectView()
+        glass.cornerRadius = cornerRadius
+        glass.contentView = content
+        return glass
+    }
+    let effect = NSVisualEffectView()
+    effect.material = .popover
+    effect.state = .active
+    effect.wantsLayer = true
+    effect.layer?.cornerRadius = cornerRadius
+    effect.layer?.masksToBounds = true
+    effect.layer?.borderWidth = 0.5
+    effect.layer?.borderColor = NSColor.separatorColor.cgColor
+    effect.addSubview(content)
+    return effect
+}
+
+/// A short-lived bubble next to the caret ("中文标点" / "英文标点"), like the system IME's mode notices.
+final class StatusHUD {
+    static let shared = StatusHUD()
+    private let panel: NSPanel
+    private let container: NSView
+    private let content = NSView()
+    private let label = NSTextField(labelWithString: "")
+    private var hideTimer: DispatchWorkItem?
+
+    private init() {
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 80, height: 30), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)))
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.ignoresMouseEvents = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+        label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .labelColor
+        label.alignment = .center
+        content.addSubview(label)
+        container = makeBackdrop(content: content, cornerRadius: 8)
+        panel.contentView = container
+    }
+
+    /// Show `text` for a second below the line at `anchor` (above it when the candidate window is there,
+    /// or near the pointer when the app gave no caret rectangle).
+    func show(_ text: String, anchor: NSRect) {
+        panel.appearance = Settings.shared.nsAppearance
+        label.stringValue = text
+        label.sizeToFit()
+        let size = NSSize(width: ceil(label.frame.width) + 24, height: ceil(label.frame.height) + 12)
+        label.frame = NSRect(x: 12, y: 6, width: size.width - 24, height: size.height - 12)
+        content.frame = NSRect(origin: .zero, size: size)
+        container.frame = NSRect(origin: .zero, size: size)
+        var origin: NSPoint
+        if anchor.isEmpty {
+            let m = NSEvent.mouseLocation
+            origin = NSPoint(x: m.x + 12, y: m.y - size.height - 12)
+        } else if CandidatePanel.shared.isVisible {
+            origin = NSPoint(x: anchor.minX, y: anchor.maxY + 6)
+        } else {
+            origin = NSPoint(x: anchor.minX, y: anchor.minY - size.height - 6)
+        }
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(anchor.isEmpty ? NSEvent.mouseLocation : anchor.origin) }) ?? NSScreen.main {
+            let vf = screen.visibleFrame
+            if origin.y < vf.minY { origin.y = anchor.maxY + 6 }
+            if origin.y + size.height > vf.maxY { origin.y = vf.maxY - size.height - 4 }
+            origin.x = min(max(vf.minX + 4, origin.x), vf.maxX - size.width - 4)
+        }
+        panel.setFrame(NSRect(origin: origin, size: size), display: true)
+        panel.orderFrontRegardless()
+        hideTimer?.cancel()
+        let item = DispatchWorkItem { [weak self] in self?.panel.orderOut(nil) }
+        hideTimer = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: item)
+    }
 }
 
 final class CandidateView: NSView {

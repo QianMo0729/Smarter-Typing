@@ -59,6 +59,11 @@ final class SmartPinyinInputController: IMKInputController {
         let code = event.keyCode
         let chars = event.characters ?? ""
 
+        if mods == [.control] && (event.charactersIgnoringModifiers == "." || code == 47) {
+            // ⌃. : Chinese ↔ English punctuation, the shortcut the other Chinese IMEs on the Mac use
+            togglePunctuation(client: client)
+            return true
+        }
         if !mods.isEmpty {
             // shortcuts (cmd+z, cmd+v, ...) change text in ways we cannot follow
             if composer.isComposing { commitRawText(client) }
@@ -91,12 +96,39 @@ final class SmartPinyinInputController: IMKInputController {
             updateMarked(client)
             return true
         }
-        if settings.fullWidthPunctuation, let p = punct.map(ch) {
+        if let p = punctuation(for: ch, client: client) {
             insert(p, client: client, learnable: false)
             return true
         }
         noteForeignText(chars)
         return false
+    }
+
+    /// What a punctuation key inserts, or nil when it should reach the app unchanged. In Chinese punctuation
+    /// mode the key is mapped to its full-width form, except for a period right after an ASCII digit, which
+    /// stays a decimal point ("3.14", "v0.2").
+    private func punctuation(for ch: Character, client: IMKTextInput) -> String? {
+        guard settings.fullWidthPunctuation else { return nil }
+        if ch == ".", let prev = characterBeforeCursor(client), prev.isASCII, prev.isNumber { return nil }
+        return punct.map(ch)
+    }
+
+    /// The character just before the insertion point, from the document when the app lets us read it,
+    /// otherwise from our own record of what was typed recently.
+    private func characterBeforeCursor(_ client: IMKTextInput) -> Character? {
+        let sel = client.selectedRange()
+        if sel.location != NSNotFound, sel.location > 0,
+           let s = client.attributedSubstring(from: NSRange(location: sel.location - 1, length: 1))?.string, let ch = s.last {
+            return ch
+        }
+        return localContext.last
+    }
+
+    private func togglePunctuation(client: IMKTextInput) {
+        settings.fullWidthPunctuation.toggle()
+        var rect = NSRect.zero
+        client.attributes(forCharacterIndex: 0, lineHeightRectangle: &rect)
+        StatusHUD.shared.show(settings.fullWidthPunctuation ? "中文标点" : "英文标点", anchor: rect)
     }
 
     private func handleComposing(_ event: NSEvent, code: UInt16, chars: String, client: IMKTextInput) -> Bool {
@@ -110,6 +142,11 @@ final class SmartPinyinInputController: IMKInputController {
             composer.backspace()
             if composer.isComposing { updateMarked(client) } else { clearMarked(client) }
             return true
+        case 117: // forward delete: the key after the caret
+            guard composer.deleteForward() else { return true }
+            expanded = false
+            if composer.isComposing { updateMarked(client) } else { clearMarked(client) }
+            return true
         case 36, 76: // return: literal letters
             commitRawText(client)
             return true
@@ -118,11 +155,17 @@ final class SmartPinyinInputController: IMKInputController {
             composer.reset()
             clearMarked(client)
             return true
-        case 123: // ←
-            if vertical { pageBy(-1) } else { composer.moveHighlight(-1) }
+        case 123, 124: // ← →: move the caret inside the pinyin; inside the expanded grid they move the highlight
+            let dir = code == 124 ? 1 : -1
+            if expanded && !vertical { composer.moveHighlight(dir) } else { moveCaret(dir, client: client) }
             return true
-        case 124: // →
-            if vertical { pageBy(1) } else { composer.moveHighlight(1) }
+        case 115, 119: // home / end: caret to the start / end of the pinyin
+            expanded = false
+            composer.moveCaret(toEnd: code == 119)
+            updateMarked(client)
+            return true
+        case 116, 121: // page up / page down
+            pageBy(code == 121 ? 1 : -1)
             return true
         case 125: // ↓: horizontal — expand into the grid, then move down a row; vertical — next candidate
             if vertical { composer.moveHighlight(1) }
@@ -138,7 +181,10 @@ final class SmartPinyinInputController: IMKInputController {
         default: break
         }
         guard let ch, chars.count == 1 else { return true }
-        if ch >= "a" && ch <= "z" || (ch == "'" && !composer.raw.isEmpty) {
+        if let v = ch.unicodeScalars.first?.value, v < 0x20 || v == 0x7F || (0xF700...0xF8FF).contains(v) {
+            return true   // other function and control keys do nothing while composing
+        }
+        if ch >= "a" && ch <= "z" || (ch == "'" && composer.caret > 0) {
             expanded = false
             composer.insert(String(ch))
             updateMarked(client)
@@ -163,12 +209,17 @@ final class SmartPinyinInputController: IMKInputController {
             // punctuation commits the smart first choice, then the punctuation
             if let r = composer.commitHighlighted() { finishCommit(r, client: client) }
             if !composer.isComposing {
-                if settings.fullWidthPunctuation, let p = punct.map(ch) { insert(p, client: client, learnable: false) }
-                else { insert(String(ch), client: client, learnable: false) }
+                insert(punctuation(for: ch, client: client) ?? String(ch), client: client, learnable: false)
             }
             return true
         }
         return true
+    }
+
+    private func moveCaret(_ delta: Int, client: IMKTextInput) {
+        guard composer.moveCaret(delta) else { return }
+        expanded = false
+        updateMarked(client)
     }
 
     private func pageBy(_ dir: Int) {
@@ -210,7 +261,7 @@ final class SmartPinyinInputController: IMKInputController {
         let text = composer.markedText
         let attrs: [NSAttributedString.Key: Any] = [.underlineStyle: NSUnderlineStyle.single.rawValue]
         client.setMarkedText(NSAttributedString(string: text, attributes: attrs),
-                             selectionRange: NSRange(location: (text as NSString).length, length: 0),
+                             selectionRange: NSRange(location: composer.markedCaret, length: 0),
                              replacementRange: NSRange(location: NSNotFound, length: NSNotFound))
         renderCandidates()
     }
@@ -275,6 +326,10 @@ final class SmartPinyinInputController: IMKInputController {
         let prefs = NSMenuItem(title: "智能拼音设置…", action: #selector(showSettings(_:)), keyEquivalent: "")
         prefs.target = self
         m.addItem(prefs)
+        let punctItem = NSMenuItem(title: "中文标点（⌃.）", action: #selector(togglePunctuationFromMenu(_:)), keyEquivalent: "")
+        punctItem.target = self
+        punctItem.state = settings.fullWidthPunctuation ? .on : .off
+        m.addItem(punctItem)
         m.addItem(.separator())
         let ready = NSMenuItem(title: services.neural.isReady ? "智能判断：已就绪" : "智能判断：加载中", action: nil, keyEquivalent: "")
         ready.isEnabled = false
@@ -283,6 +338,10 @@ final class SmartPinyinInputController: IMKInputController {
         stats.isEnabled = false
         m.addItem(stats)
         return m
+    }
+
+    @objc func togglePunctuationFromMenu(_ sender: Any?) {
+        settings.fullWidthPunctuation.toggle()
     }
 
     @objc func showSettings(_ sender: Any?) {

@@ -128,7 +128,9 @@ struct SettingsView: View {
             }
             Section("输入") {
                 Toggle("拼音按音节分隔显示（zhi neng）", isOn: $s.spacedPinyin)
-                Toggle("中文标点使用全角", isOn: $s.fullWidthPunctuation)
+                Toggle("中文标点（全角）", isOn: $s.fullWidthPunctuation)
+                Text("打字时按 ⌃.（Control + 句号）可随时在中文标点和英文标点之间切换，输入法菜单里也有这个开关。数字后面的句号保持为小数点（3.14）。")
+                    .font(.footnote).foregroundStyle(.secondary)
                 Text("中/英键（Caps Lock）切换输入法：在“系统设置 › 键盘 › 输入法”中打开“使用中/英键切换”。")
                     .font(.footnote).foregroundStyle(.secondary)
             }
@@ -172,21 +174,41 @@ struct CandidatePreview: NSViewRepresentable {
     }
 }
 
+/// The settings window of a background process. An input method is never the active app when its menu is
+/// used (the menu belongs to the system's text input agent), and since macOS 14 an app may only activate
+/// itself cooperatively, so `NSApp.activate` is frequently denied. An ordinary window of an inactive app then
+/// stays behind the frontmost app's windows, and a window last used on another Space reopens there. The
+/// window is therefore shown floating and on the current Space, and only drops back to a normal window
+/// once it has had the keyboard focus (the user clicked it) and loses it again.
 final class SettingsWindow {
     static let shared = SettingsWindow()
     private var window: NSWindow?
+    private var observer: Any?
 
     func show(onClearData: @escaping () -> Void) {
-        if window == nil {
-            let host = NSHostingController(rootView: SettingsView(onClearData: onClearData))
-            let w = NSWindow(contentViewController: host)
-            w.title = "智能拼音 设置"
-            w.styleMask = [.titled, .closable]
-            w.isReleasedWhenClosed = false
+        let w = window ?? makeWindow(onClearData: onClearData)
+        w.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        w.level = .floating
+        if !w.isVisible {
+            w.contentView?.layoutSubtreeIfNeeded()
             w.center()
-            window = w
         }
-        NSApp.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
+        w.makeKeyAndOrderFront(nil)
+        w.orderFrontRegardless()
+        NSApp.activate()
+    }
+
+    private func makeWindow(onClearData: @escaping () -> Void) -> NSWindow {
+        let host = NSHostingController(rootView: SettingsView(onClearData: onClearData))
+        let w = NSWindow(contentViewController: host)
+        w.title = "智能拼音 设置"
+        w.styleMask = [.titled, .closable]
+        w.isReleasedWhenClosed = false
+        w.hidesOnDeactivate = false
+        observer = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: w, queue: .main) { [weak w] _ in
+            w?.level = .normal
+        }
+        window = w
+        return w
     }
 }

@@ -36,6 +36,10 @@ public final class Composer {
     public var runOnMain: (@escaping () -> Void) -> Void = { f in DispatchQueue.main.async(execute: f) }
 
     public private(set) var raw = ""
+    /// Edit position inside `raw` (in characters): letters are inserted here and backspace deletes before it.
+    /// Candidates always cover the whole of `raw`, so fixing a letter in the middle immediately updates the
+    /// smart first choice for the complete input.
+    public private(set) var caret = 0
     public private(set) var parts: [(text: String, cand: Candidate, raw: String, rank: Int)] = []
     public private(set) var analysis: Analysis?
     public private(set) var version = 0
@@ -56,10 +60,22 @@ public final class Composer {
 
     public var isComposing: Bool { !raw.isEmpty || !parts.isEmpty }
     /// Text for the inline marked text: converted parts followed by the remaining pinyin, split into syllables.
-    public var markedText: String {
-        let py: String
-        if spacedPinyin, let a = analysis, !raw.contains("'") { py = a.segmentedPinyin(table: engine.lexicon.syllables) } else { py = raw }
-        return parts.map { $0.text }.joined() + py
+    public var markedText: String { parts.map { $0.text }.joined() + displayedPinyin }
+    /// Where the caret is drawn inside `markedText` (UTF-16 offset): after the converted parts, then after
+    /// `caret` letters of the pinyin, skipping the syllable spaces the display adds.
+    public var markedCaret: Int {
+        var offset = (parts.map { $0.text }.joined() as NSString).length
+        var letters = 0
+        for ch in displayedPinyin {
+            if letters == caret { break }
+            offset += 1
+            if ch != " " { letters += 1 }
+        }
+        return offset
+    }
+    private var displayedPinyin: String {
+        if spacedPinyin, let a = analysis, !raw.contains("'") { return a.segmentedPinyin(table: engine.lexicon.syllables) }
+        return raw
     }
 
     public func begin(context: String, app: String?) {
@@ -69,7 +85,7 @@ public final class Composer {
     }
 
     public func reset() {
-        raw = ""; parts = []; analysis = nil; displayed = []; displayedVersion = -1
+        raw = ""; caret = 0; parts = []; analysis = nil; displayed = []; displayedVersion = -1
         highlighted = 0; navigated = false; firstAnalysis = nil
         panelTimer?.cancel(); panelTimer = nil
     }
@@ -78,18 +94,23 @@ public final class Composer {
 
     // MARK: editing
 
+    /// Insert typed keys at the caret.
     public func insert(_ s: String) {
-        raw += s
+        raw.insert(contentsOf: s, at: raw.index(raw.startIndex, offsetBy: caret))
+        caret += s.count
         refresh()
     }
 
-    /// Returns false when there was nothing to delete.
+    /// Delete the key before the caret. At the start of the pinyin, the last converted part is unconverted
+    /// back into its keys instead. Returns false when there was nothing to delete.
     @discardableResult
     public func backspace() -> Bool {
-        if !raw.isEmpty {
-            raw.removeLast()
+        if caret > 0 {
+            raw.remove(at: raw.index(raw.startIndex, offsetBy: caret - 1))
+            caret -= 1
         } else if let last = parts.popLast() {
-            raw = last.raw
+            raw = last.raw + raw
+            caret = last.raw.count
         } else {
             return false
         }
@@ -97,6 +118,28 @@ public final class Composer {
         refresh()
         return true
     }
+
+    /// Forward delete: remove the key after the caret. Returns false when the caret is at the end.
+    @discardableResult
+    public func deleteForward() -> Bool {
+        guard caret < raw.count else { return false }
+        raw.remove(at: raw.index(raw.startIndex, offsetBy: caret))
+        if !isComposing { reset(); return true }
+        refresh()
+        return true
+    }
+
+    /// Move the caret inside the pinyin (← →). Returns false when it was already at that end.
+    @discardableResult
+    public func moveCaret(_ delta: Int) -> Bool {
+        let target = max(0, min(raw.count, caret + delta))
+        guard target != caret else { return false }
+        caret = target
+        return true
+    }
+
+    /// Put the caret at the start (Home) or the end (End) of the pinyin.
+    public func moveCaret(toEnd: Bool) { caret = toEnd ? raw.count : 0 }
 
     public func moveHighlight(_ delta: Int) {
         guard !displayed.isEmpty else { return }
@@ -192,6 +235,7 @@ public final class Composer {
         let rank = index == 0 ? 0 : index
         parts.append((c.text, c, consumed, rank))
         raw = rest
+        caret = raw.count
         if raw.isEmpty {
             return finish(rank: parts.count > 1 ? -1 : rank, waited: waited)
         }

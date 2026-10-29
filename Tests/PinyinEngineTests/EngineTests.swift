@@ -176,4 +176,62 @@ final class EngineTests: XCTestCase {
         for _ in 0..<4 { c.backspace() }
         XCTAssertFalse(c.isComposing)
     }
+
+    func testComposerCaretEditsInTheMiddle() throws {
+        let e = try engine()
+        let c = Composer(engine: e, neural: nil)
+        c.begin(context: "我想开发一个", app: nil)
+        for ch in "zhnengshurufa" { c.insert(String(ch)) }       // the i of zhi was skipped
+        XCTAssertEqual(c.caret, 13)
+        XCTAssertTrue(c.moveCaret(-11))                          // zh|nengshurufa
+        XCTAssertEqual(c.caret, 2)
+        c.insert("i")
+        XCTAssertEqual(c.raw, "zhinengshurufa")
+        XCTAssertEqual(c.caret, 3)
+        XCTAssertEqual(c.displayed.first?.text, "智能输入法", "candidates cover the whole input, not just the part before the caret")
+        XCTAssertEqual(c.markedText, "zhi neng shu ru fa")
+        XCTAssertEqual(c.markedCaret, 3, "the caret is drawn after zhi, before the syllable space")
+        XCTAssertTrue(c.moveCaret(1))
+        XCTAssertEqual(c.markedCaret, 5, "zhi n|eng")
+        c.backspace()                                            // deletes the n before the caret
+        XCTAssertEqual(c.raw, "zhiengshurufa")
+        XCTAssertEqual(c.caret, 3)
+        XCTAssertTrue(c.deleteForward())                         // and the e after it
+        XCTAssertEqual(c.raw, "zhingshurufa")
+        XCTAssertEqual(c.caret, 3)
+        c.moveCaret(toEnd: true)
+        XCTAssertFalse(c.deleteForward(), "nothing after the caret at the end")
+        c.moveCaret(-9)
+        c.insert("e")
+        XCTAssertEqual(c.raw, "zhiengshurufa")
+        c.moveCaret(toEnd: false)
+        XCTAssertEqual(c.caret, 0)
+        XCTAssertFalse(c.moveCaret(-1))
+        XCTAssertFalse(c.backspace(), "nothing before the caret and nothing converted")
+        XCTAssertEqual(c.raw, "zhiengshurufa")
+        c.moveCaret(toEnd: true)
+        XCTAssertEqual(c.markedCaret, (c.markedText as NSString).length)
+        let r = c.commitHighlighted()
+        XCTAssertNotNil(r)
+        XCTAssertFalse(c.isComposing)
+        XCTAssertEqual(c.caret, 0)
+    }
+
+    func testComposerCaretAfterPartialSelection() throws {
+        let e = try engine()
+        let c = Composer(engine: e, neural: nil)
+        c.begin(context: "", app: nil)
+        for ch in "zhinengshurufa" { c.insert(String(ch)) }
+        c.moveCaret(-3)
+        let idx = c.displayed.firstIndex { $0.text == "智能" || $0.text == "只能" }!
+        XCTAssertNil(c.select(index: idx))
+        XCTAssertEqual(c.raw, "shurufa")
+        XCTAssertEqual(c.caret, 7, "after a partial selection the caret is at the end of the remaining pinyin")
+        XCTAssertEqual(c.markedCaret, (c.markedText as NSString).length)
+        c.moveCaret(toEnd: false)
+        XCTAssertTrue(c.backspace(), "backspace at the start of the pinyin unconverts the last part")
+        XCTAssertTrue(c.parts.isEmpty)
+        XCTAssertEqual(c.raw, "zhinengshurufa")
+        XCTAssertEqual(c.caret, 7)
+    }
 }
