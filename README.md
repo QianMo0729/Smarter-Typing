@@ -79,6 +79,7 @@ swift test --scratch-path /tmp/sp-test # 单元测试（Desktop 在 iCloud 里�
 .build/release/stbench decode zhineng "时间不够，我" --nn        # 看候选、概率与各项特征
 .build/release/stbench eval data/eval/test.jsonl --nn            # 留出语料上的首选准确率 / 误触恢复 / 误纠
 .build/release/stbench latency --key-ms 70 --space-ms 40         # 真实节奏回放：空格时是否已有智能首选
+.build/release/stbench session --n 300                            # 连续打完整段：空格等待、小模型时间、前文缓存（--fast 不停顿连打）
 .build/release/stbench personalize murmur --habit uo             # 模拟真实用户长期使用，看学习效果
 ```
 
@@ -89,6 +90,7 @@ tools/build_lexicon.py && tools/build_lexbin.py    # rime-ice 词库 → lex.bin
 tools/prepare_corpus.py                            # 语料清洗（维基、知乎、V2EX、FineWeb-Edu 中文）
 tools/build_ngram.py                               # 分词 + 改进 Kneser-Ney 二元模型 → lm.bin
 tools/make_evalset.py data/eval/test.jsonl 3000 --split test
+tools/make_sessions.py data/eval/sessions.jsonl 60               # stbench session 用的连续打字段落
 .build/release/stbench eval data/eval/train.jsonl --nn --dump feats.jsonl
 tools/fit_weights.py feats.jsonl data/build/weights.json
 ```

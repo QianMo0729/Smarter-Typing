@@ -8,3 +8,4 @@
 /tools/.venv
 * 2
 .DS_Store
+__pycache__/

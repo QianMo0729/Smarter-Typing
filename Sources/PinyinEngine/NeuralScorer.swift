@@ -36,6 +36,8 @@ public final class NeuralScorer {
     public private(set) var contextText: String = ""
     public var lastScoreMs: Double = 0
     public var lastScoreTokens = 0
+    /// Context tokens the last `setContext` had to compute (0 when the cache already held them).
+    public private(set) var lastPrefillTokens = 0
 
     public static func silenceLogs() {
         llama_log_set({ _, _, _ in }, nil)
@@ -120,15 +122,25 @@ public final class NeuralScorer {
         return mx + log(sum)
     }
 
-    /// Choose the window of `full` to keep in the cache. The window start stays anchored while text is
-    /// appended (so each commit only costs the new tokens) and jumps forward when it grows too long.
+    /// Characters of context the model always sees when there are that many (a fresh window after trimming).
+    public var minWindowChars: Int { config.trimTo * 5 / 4 }
+
+    /// Choose the window of `full` to keep in the cache.
     func window(for full: String) -> String {
-        let maxChars = config.maxContextTokens * 5 / 4, trimChars = config.trimTo * 5 / 4
-        if !contextText.isEmpty, let r = full.range(of: contextText, options: .backwards) {
-            let extended = contextText + full[r.upperBound...]
-            if extended.count <= maxChars && full.hasSuffix(extended) { return extended }
+        NeuralScorer.window(for: full, cached: contextText, maxChars: config.maxContextTokens * 5 / 4, minChars: minWindowChars)
+    }
+
+    /// The window start stays anchored where the cached text starts while text is appended (so each commit only
+    /// costs the new tokens), and jumps forward when the window grows past `maxChars`. The cache is only reused
+    /// when it still shows the model as much as a fresh window would: all of a short context, at least
+    /// `minChars` of a long one. A cache last filled with a short piece of the same text (the end of a
+    /// sentence) must not narrow what the model sees to that piece.
+    static func window(for full: String, cached: String, maxChars: Int, minChars: Int) -> String {
+        if !cached.isEmpty, let r = full.range(of: cached, options: .backwards) {
+            let extended = cached + full[r.upperBound...]
+            if extended.count <= maxChars && extended.count >= min(full.count, minChars) && full.hasSuffix(extended) { return extended }
         }
-        return full.count <= maxChars ? full : String(full.suffix(trimChars))
+        return full.count <= maxChars ? full : String(full.suffix(minChars))
     }
 
     /// Make sequence 0 hold the tail of `full`. Returns false on failure.
@@ -140,10 +152,12 @@ public final class NeuralScorer {
         // longest common prefix with what is cached
         var common = 0
         while common < min(toks.count, cached.count) && toks[common] == cached[common] { common += 1 }
+        lastPrefillTokens = 0
         if common == toks.count && common == cached.count && !lastRow.isEmpty { contextText = text; return true }
         if common == toks.count { common -= 1 }   // need to recompute logits of the last token
         if common == 0 { llama_memory_clear(memory, true) } else { _ = llama_memory_seq_rm(memory, 0, llama_pos(common), -1) }
         var pos = common
+        lastPrefillTokens = toks.count - common
         while pos < toks.count {
             clearBatch()
             let end = min(toks.count, pos + Int(batchCap))

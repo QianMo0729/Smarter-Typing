@@ -25,6 +25,18 @@ public final class NeuralService: @unchecked Sendable {
     private var results: [Int: Result] = [:]
     private var waiters: [Int: [DispatchSemaphore]] = [:]
     public private(set) var loadError: String?
+
+    /// Running totals of the model's work, for measuring latency and resource use.
+    public struct Usage {
+        public var jobs = 0
+        public var primes = 0
+        public var ms = 0.0                  // model time: context updates + scoring
+        public var contextTokens = 0         // context tokens computed (what the cache did not already hold)
+        public var candidateTokens = 0       // candidate tokens scored
+        public var narrowedContexts = 0      // jobs where the model saw less text than a fresh window would show it
+    }
+    private var _usage = Usage()
+    public var usage: Usage { lock.lock(); defer { lock.unlock() }; return _usage }
     public var isReady: Bool { lock.lock(); defer { lock.unlock() }; return scorer != nil }
 
     public init() {}
@@ -61,7 +73,13 @@ public final class NeuralService: @unchecked Sendable {
     public func prepareContext(_ context: String) {
         queue.async {
             self.lock.lock(); let s = self.scorer; self.lock.unlock()
-            s?.setContext(context)
+            guard let s else { return }
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            s.setContext(context)
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+            self.lock.lock()
+            self._usage.primes += 1; self._usage.ms += ms; self._usage.contextTokens += s.lastPrefillTokens
+            self.lock.unlock()
         }
     }
 
@@ -85,10 +103,13 @@ public final class NeuralService: @unchecked Sendable {
             guard let s else { continue }
             let t0 = DispatchTime.now().uptimeNanoseconds
             s.setContext(job.context)
+            let prefill = s.lastPrefillTokens, seen = s.contextText.count
             let scores = s.score(job.options)
             let t1 = DispatchTime.now().uptimeNanoseconds
             let r = Result(version: job.version, options: job.options, scores: scores, ms: Double(t1 - t0) / 1e6, queuedAt: queuedAt, doneAt: t1)
             lock.lock()
+            _usage.jobs += 1; _usage.ms += r.ms; _usage.contextTokens += prefill; _usage.candidateTokens += s.lastScoreTokens
+            if seen < min(job.context.count, s.minWindowChars) { _usage.narrowedContexts += 1 }
             results[job.version] = r
             if results.count > 8 { for k in results.keys.sorted().dropLast(8) { results[k] = nil } }
             let ws = waiters.removeValue(forKey: job.version) ?? []

@@ -25,6 +25,8 @@ if let b = opt("--beam") { engine.decoder.options.beam = Int(b)! }
 if let b = opt("--wps") { engine.latticeOptions.wordsPerSpan = Int(b)! }
 if let b = opt("--wpn") { engine.latticeOptions.wordsPerNode = Int(b)! }
 if flag("--no-other") { engine.graphOptions.otherEdits = false }
+// load a saved personal state (a copy of ~/Library/Application Support/SmartPinyin) to see what the app sees
+if let p = opt("--personal") { PersonalStore(dir: URL(fileURLWithPath: p), engine: engine).load() }
 
 func makeNN() -> NeuralScorer? {
     if flag("--no-nn") { return nil }
@@ -65,7 +67,10 @@ case "decode":
     a = engine.analyze(raw: input, context: context)
     print(String(format: "fast %.2fms  covered %d/%d  ctxWord=%@", a.fastMs, a.covered, a.n, lex.surface(a.contextWord)))
     if flag("--nn"), let nn = makeNN() {
+        // --prime: what the cache held before (the app primes it with its own record of recent commits)
+        if let p = opt("--prime") { nn.setContext(p) }
         nn.setContext(context)
+        if flag("--prime-show") { print("nn context: \(nn.contextText)") }
         _ = nn.score(a.options)
         let t = now()
         let s = nn.score(a.options)
@@ -101,7 +106,8 @@ case "eval":
         var a = engine.analyze(raw: ex.keys, context: ex.context)
         fastMs.append(a.fastMs)
         if let nn {
-            nn.setContext(ex.context)
+            // --nn-ctx N: the model sees only the last N characters (what a collapsed cache window gives it)
+            if let k = Int(opt("--nn-ctx") ?? "") { nn.setContext(""); nn.setContext(String(ex.context.suffix(k))) } else { nn.setContext(ex.context) }
             let t = now()
             let s = nn.score(a.options)
             nnMs.append(Double(now() - t) / 1e6); nnTok.append(nn.lastScoreTokens)
@@ -303,6 +309,98 @@ case "latency":
     print(String(format: "commits %d  smart first choice used %.1f%%  top1 %.1f%%  wait on space: p50 %.1fms p90 %.1fms p99 %.1fms max %.1fms  visible reorders after 160ms: %d",
                  n, 100 * Double(smart) / Double(max(1, n)), 100 * Double(correct) / Double(max(1, n)), q(0.5), q(0.9), q(0.99), s.last ?? 0, shownChanges))
     _ = refCorrect; _ = backspaces
+    service.shutdown()
+
+case "session":
+    // stbench session [--set data/eval/sessions.jsonl] [--n N] [--key-ms 110] [--space-ms 70] [--fast]
+    //                 [--ctx-chars 320] [--old-prime] [--reset P]
+    // Types whole paragraphs (tools/make_sessions.py), one composition after another, reading the document
+    // context the way the IME does and priming the model's cache after every insert. Reports accuracy, the wait
+    // on space and the model's work: time, context tokens computed, and jobs where the cache narrowed the
+    // context the model saw. --old-prime primes with the IME's own record of its recent commits, as versions
+    // up to 0.2 did; --reset P clears that record before a composition with probability P (a cursor the IME
+    // lost track of, an app switch). --fast types without pauses and always waits for the model on space.
+    setvbuf(stdout, nil, _IOLBF, 0)
+    struct SessionEvent: Codable { var text: String?; var keys: String?; var target: String? }
+    struct Session: Codable { var src: String; var prefix: String; var events: [SessionEvent] }
+    let path = opt("--set") ?? root.appendingPathComponent("data/eval/sessions.jsonl").path
+    let sessions = try! String(contentsOfFile: path, encoding: .utf8).split(separator: "\n")
+        .compactMap { try? JSONDecoder().decode(Session.self, from: Data($0.utf8)) }
+    let limit = Int(opt("--n") ?? "") ?? Int.max
+    let fast = flag("--fast")
+    let keyMs = Double(opt("--key-ms") ?? "") ?? 110, spaceMs = Double(opt("--space-ms") ?? "") ?? 70
+    let ctxChars = Int(opt("--ctx-chars") ?? "") ?? Composer.contextLength
+    let oldPrime = flag("--old-prime")
+    let localCap = oldPrime ? 200 : Composer.contextLength
+    let resetP = Double(opt("--reset") ?? "") ?? 0
+    let service = NeuralService()
+    var ready = false
+    service.load(modelPath: modelPath) { ready = true }
+    while !ready { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+    let composer = Composer(engine: engine, neural: service)
+    if fast { composer.policy.commitWaitMs = 3000 }
+    var rng = SplitMix(seed: 5)
+    func pause(_ meanMs: Double) {
+        let u1 = max(1e-9, rng.nextDouble()), u2 = rng.nextDouble()
+        let z = (-2 * log(u1)).squareRoot() * cos(2 * Double.pi * u2)
+        RunLoop.main.run(until: Date().addingTimeInterval(max(15, meanMs * exp(0.35 * z - 0.06)) / 1000))
+    }
+    let u0 = service.usage
+    var ru0 = rusage(); getrusage(RUSAGE_SELF, &ru0)
+    let t0 = Date()
+    var n = 0, correct = 0, smart = 0, keys = 0
+    var waits: [Double] = []
+    outer: for s in sessions {
+        var doc = s.prefix.isEmpty ? "" : s.prefix + "\n"
+        var local = ""
+        for e in s.events {
+            if let t = e.text {
+                doc += t
+                local = String((local + t).suffix(localCap))
+                if oldPrime { service.prepareContext(local) } else { composer.noteInserted(t) }
+                continue
+            }
+            guard let k = e.keys, let target = e.target else { continue }
+            if n >= limit { break outer }
+            if rng.nextDouble() < resetP { local = "" }
+            var ctx = String(doc.suffix(ctxChars))
+            if ctx.isEmpty { ctx = local }
+            composer.begin(context: ctx, app: "bench")
+            for (i, ch) in k.enumerated() {
+                composer.insert(String(ch)); keys += 1
+                if !fast { pause(i == k.count - 1 ? spaceMs : keyMs) }
+            }
+            var r = composer.commitHighlighted()
+            var tries = 0
+            while r == nil && composer.isComposing && tries < 10 { r = composer.commitHighlighted(); tries += 1 }
+            guard let r else { continue }
+            n += 1
+            waits.append(r.waitedMs)
+            if r.usedNeural { smart += 1 }
+            if r.text == target { correct += 1 }
+            // the user puts mistakes right, so the document follows the paragraph
+            doc += target
+            local = String((local + target).suffix(localCap))
+            if oldPrime { service.prepareContext(local) }
+            if !fast { pause(250) }
+        }
+    }
+    let wall = Date().timeIntervalSince(t0)
+    var ru1 = rusage(); getrusage(RUSAGE_SELF, &ru1)
+    func secs(_ t: timeval) -> Double { Double(t.tv_sec) + Double(t.tv_usec) / 1e6 }
+    let cpu = secs(ru1.ru_utime) + secs(ru1.ru_stime) - secs(ru0.ru_utime) - secs(ru0.ru_stime)
+    let u = service.usage
+    let jobs = u.jobs - u0.jobs, primes = u.primes - u0.primes, nnMs = u.ms - u0.ms
+    let w = waits.sorted()
+    func q(_ p: Double) -> Double { w.isEmpty ? 0 : w[min(w.count - 1, Int(Double(w.count) * p))] }
+    let per = Double(max(1, n))
+    print(String(format: "compositions %d (%d keys)  top1 %.1f%%  smart first choice used %.1f%%  wait on space: p50 %.1fms p90 %.1fms p99 %.1fms max %.1fms",
+                 n, keys, 100 * Double(correct) / per, 100 * Double(smart) / per, q(0.5), q(0.9), q(0.99), w.last ?? 0))
+    print(String(format: "model: %d jobs + %d primes, %.0f ms = %.1f ms per composition (busy %.1f%% of wall time); context tokens computed %.1f per composition, candidate tokens %.1f; narrowed contexts %d (%.1f%% of jobs)",
+                 jobs, primes, nnMs, nnMs / per, 100 * nnMs / 1000 / wall, Double(u.contextTokens - u0.contextTokens) / per,
+                 Double(u.candidateTokens - u0.candidateTokens) / per, u.narrowedContexts - u0.narrowedContexts,
+                 100 * Double(u.narrowedContexts - u0.narrowedContexts) / Double(max(1, jobs))))
+    print(String(format: "process CPU %.1f s over %.1f s (%.0f%%), peak memory %.0f MB", cpu, wall, 100 * cpu / wall, Double(ru1.ru_maxrss) / 1048576))
     service.shutdown()
 
 case "nncheck":

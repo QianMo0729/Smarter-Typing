@@ -234,4 +234,31 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(c.raw, "zhinengshurufa")
         XCTAssertEqual(c.caret, 7)
     }
+
+    // MARK: context of the small model
+
+    func testCacheWindowNeverNarrowsTheContext() {
+        let sentence = "今天的会议主要讨论了新版本的发布计划，大家都希望在保证质量的"
+        // the cache last held only the end of the sentence (the IME's previous commit): the model must still
+        // see the whole sentence, not just that piece
+        XCTAssertEqual(NeuralScorer.window(for: sentence, cached: "在保证质量的", maxChars: 200, minChars: 140), sentence)
+        // text added after a cached window keeps the window anchored, so only the new tokens are computed
+        let long = String(repeating: "前文", count: 100) + sentence
+        let anchored = String(long.suffix(150))
+        XCTAssertEqual(NeuralScorer.window(for: long + "同时", cached: anchored, maxChars: 200, minChars: 140), anchored + "同时")
+        // a cached piece shorter than the minimum window is not reused for a long context
+        XCTAssertEqual(NeuralScorer.window(for: long, cached: String(long.suffix(30)), maxChars: 200, minChars: 140), String(long.suffix(140)))
+        // and the window jumps forward once it would grow past the maximum
+        let grown = long + String(repeating: "字", count: 60)
+        XCTAssertEqual(NeuralScorer.window(for: grown, cached: anchored, maxChars: 200, minChars: 140), String(grown.suffix(140)))
+    }
+
+    func testInsertedTextJoinsTheContext() throws {
+        let c = Composer(engine: try engine(), neural: nil)
+        c.begin(context: "我想", app: nil)
+        for ch in "zhidao" { c.insert(String(ch)) }
+        let r = try XCTUnwrap(c.commitHighlighted())
+        c.noteInserted("，")
+        XCTAssertEqual(c.context, "我想" + r.text + "，")
+    }
 }

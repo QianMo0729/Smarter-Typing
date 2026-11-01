@@ -244,7 +244,7 @@ final class SmartPinyinInputController: IMKInputController {
                 services.learner.didReplaceSelection(s, time: now)
             }
             if sel.location > 0 {
-                let len = min(sel.location, 160)
+                let len = min(sel.location, Composer.contextLength)
                 if let s = client.attributedSubstring(from: NSRange(location: sel.location - len, length: len))?.string {
                     context = s
                 }
@@ -254,7 +254,7 @@ final class SmartPinyinInputController: IMKInputController {
         if context.isEmpty { context = localContext }
         composer.neural = settings.smartRanking ? services.neural : nil
         composer.spacedPinyin = settings.spacedPinyin
-        composer.begin(context: String(context.suffix(160)), app: appID)
+        composer.begin(context: String(context.suffix(Composer.contextLength)), app: appID)
     }
 
     private func updateMarked(_ client: IMKTextInput) {
@@ -305,17 +305,20 @@ final class SmartPinyinInputController: IMKInputController {
     private func insert(_ text: String, client: IMKTextInput, learnable: Bool) {
         let sel = client.selectedRange()
         client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: NSNotFound))
-        localContext = String((localContext + text).suffix(200))
+        localContext = String((localContext + text).suffix(Composer.contextLength))
         if sel.location != NSNotFound { expectedLocation = sel.location + (text as NSString).length } else { expectedLocation = nil }
         if !learnable {
             // punctuation / literal text we typed: the learner treats it as a boundary it cannot interpret
             services.learner.didBreak(time: now)
+            composer.noteInserted(text)
         }
-        services.neural.prepareContext(localContext)
+        // A commit has already put the context plus the new text into the model's cache (Composer.finish).
+        // localContext is not used for that: it only holds what we typed since the cursor last jumped, and the
+        // model would then see that piece instead of the text before the cursor.
     }
 
     private func noteForeignText(_ chars: String) {
-        localContext = String((localContext + chars).suffix(200))
+        localContext = String((localContext + chars).suffix(Composer.contextLength))
         if let e = expectedLocation { expectedLocation = e + (chars as NSString).length }
     }
 

@@ -95,6 +95,7 @@ final class Settings: ObservableObject {
 }
 
 struct SettingsView: View {
+    static let width: CGFloat = 460
     @ObservedObject var s = Settings.shared
     var onClearData: () -> Void
 
@@ -143,7 +144,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460)
+        .frame(width: SettingsView.width)
     }
 
     func color(_ t: Settings.ThemeColor) -> NSColor {
@@ -190,7 +191,7 @@ final class SettingsWindow {
         w.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         w.level = .floating
         if !w.isVisible {
-            w.contentView?.layoutSubtreeIfNeeded()
+            fitToContent(w)
             w.center()
         }
         w.makeKeyAndOrderFront(nil)
@@ -198,11 +199,27 @@ final class SettingsWindow {
         NSApp.activate()
     }
 
+    /// A grouped form scrolls, so it reports no height of its own: a window sized by its hosting controller
+    /// opened as a bare title bar (seen on macOS 27). The window is sized here instead, to the form's full
+    /// height or the screen's, whichever is smaller; the form scrolls inside a shorter window.
+    private func fitToContent(_ w: NSWindow) {
+        // measured on a copy laid out at its full height (the rows depend on the current settings)
+        let measure = NSHostingView(rootView: SettingsView(onClearData: {}).fixedSize(horizontal: false, vertical: true))
+        var height = measure.fittingSize.height
+        if height < 200 { height = 760 }
+        let screen = (w.screen ?? NSScreen.main)?.visibleFrame.height ?? 800
+        w.setContentSize(NSSize(width: SettingsView.width, height: min(height, screen - 60)))
+    }
+
     private func makeWindow(onClearData: @escaping () -> Void) -> NSWindow {
         let host = NSHostingController(rootView: SettingsView(onClearData: onClearData))
-        let w = NSWindow(contentViewController: host)
+        host.sizingOptions = []   // the window size is set in fitToContent, not taken from the scrolling form
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: SettingsView.width, height: 700),
+                         styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        w.contentViewController = host
+        w.contentMinSize = NSSize(width: SettingsView.width, height: 300)
+        w.contentMaxSize = NSSize(width: SettingsView.width, height: .greatestFiniteMagnitude)
         w.title = "智能拼音 设置"
-        w.styleMask = [.titled, .closable]
         w.isReleasedWhenClosed = false
         w.hidesOnDeactivate = false
         observer = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: w, queue: .main) { [weak w] _ in

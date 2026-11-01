@@ -23,6 +23,9 @@ public struct CommitResult {
 /// One composition: raw keys → candidates → commit. Independent of AppKit so the IME, tests and the
 /// latency simulator share exactly the same behaviour. Call from one thread (the main thread in the IME).
 public final class Composer {
+    /// How much text before the cursor the IME hands to `begin(context:)`. Longer than the model's window
+    /// (at most 200 characters) so the window can stay anchored in the cache while text is added.
+    public static let contextLength = 320
     public let engine: Engine
     public var neural: NeuralService?
     /// Show the pinyin split into syllables ("zhi neng") in the text field.
@@ -82,6 +85,14 @@ public final class Composer {
         reset()
         self.context = context
         self.app = app
+    }
+
+    /// Text that reached the document between compositions (punctuation, letters typed as they are): it becomes
+    /// part of the context, and the model's cache takes it in before the next keystroke.
+    public func noteInserted(_ text: String) {
+        guard !isComposing, !text.isEmpty else { return }
+        context += text
+        neural?.prepareContext(context)
     }
 
     public func reset() {
